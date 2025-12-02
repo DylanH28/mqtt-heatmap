@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>WateringKart – Live Heatmap</title>
+  <title>WateringKart – Live Heatmap (Cubic Upscaled 64×64)</title>
 
   <!-- Plotly for the heatmap -->
   <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
@@ -48,7 +48,7 @@
   </style>
 </head>
 <body>
-  <h1>WateringKart – Real-Time 8×8 Heatmap</h1>
+  <h1>WateringKart – Real-Time 8×8 → 64×64 Heatmap (Cubic)</h1>
 
   <div class="status">
     Broker (browser): <code>wss://test.mosquitto.org:8081/mqtt</code><br />
@@ -60,34 +60,120 @@
 
   <div id="heatmap"></div>
 
+  <p class="small">
+    Frame format (string payload):<br />
+    <code>timestamp v1 v2 ... v64</code> or <code>timestamp,v1,v2,...,v64</code><br />
+    64 values fill an 8×8 matrix (row-major).<br />
+    Displayed as a 64×64 heatmap using bicubic interpolation.
+  </p>
 
   <script>
-    // === Heatmap setup ===
-    const GRID_SIZE = 8;
+    // === Sizes ===
+    const BASE_SIZE = 8;    // incoming frame is 8x8
+    const DISPLAY_SIZE = 64; // we upscale to 64x64 for plotting
 
-    // Initialize 8×8 grid with zeros
-    const grid = [];
-    for (let y = 0; y < GRID_SIZE; y++) {
-      const row = [];
-      for (let x = 0; x < GRID_SIZE; x++) {
-        row.push(0);
-      }
-      grid.push(row);
+    // === Helper: clamp ===
+    function clamp(val, min, max) {
+      return Math.max(min, Math.min(max, val));
     }
 
-    const xLabels = Array.from({ length: GRID_SIZE }, (_, i) => i);
-    const yLabels = Array.from({ length: GRID_SIZE }, (_, i) => i);
+    // === 1D cubic interpolation (Catmull–Rom spline) ===
+    function cubicInterpolate(p0, p1, p2, p3, t) {
+      // Catmull–Rom:
+      // 0.5 * (2p1 + (-p0 + p2)t + (2p0 - 5p1 + 4p2 - p3)t^2 + (-p0 + 3p1 - 3p2 + p3)t^3)
+      const t2 = t * t;
+      const t3 = t2 * t;
+
+      return 0.5 * (
+        2 * p1 +
+        (-p0 + p2) * t +
+        (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+        (-p0 + 3 * p1 - 3 * p2 + p3) * t3
+      );
+    }
+
+    // === Get pixel with clamping at borders ===
+    function getPixel(grid, x, y) {
+      const yy = clamp(y, 0, grid.length - 1);
+      const xx = clamp(x, 0, grid[0].length - 1);
+      return grid[yy][xx];
+    }
+
+    // === Bicubic interpolation on 2D grid ===
+    function bicubicSample(grid, x, y) {
+      const xInt = Math.floor(x);
+      const yInt = Math.floor(y);
+      const tx = x - xInt;
+      const ty = y - yInt;
+
+      // 4x4 neighborhood
+      const col = [];
+      for (let m = -1; m <= 2; m++) {
+        const rowVals = [];
+        const yy = yInt + m;
+        for (let n = -1; n <= 2; n++) {
+          const xx = xInt + n;
+          rowVals.push(getPixel(grid, xx, yy));
+        }
+        // Interpolate along x for this row
+        const c = cubicInterpolate(rowVals[0], rowVals[1], rowVals[2], rowVals[3], tx);
+        col.push(c);
+      }
+
+      // Interpolate the 4 intermediate values along y
+      return cubicInterpolate(col[0], col[1], col[2], col[3], ty);
+    }
+
+    // === Upscale BASE_SIZE x BASE_SIZE to DISPLAY_SIZE x DISPLAY_SIZE ===
+    function upscaleGridCubic(sourceGrid, srcSize, dstSize) {
+      const dst = [];
+      const maxSrcIndex = srcSize - 1;
+      const maxDstIndex = dstSize - 1;
+
+      for (let j = 0; j < dstSize; j++) {
+        const row = [];
+        // Map destination index j to source coordinate
+        const srcY = (j * maxSrcIndex) / maxDstIndex;
+        for (let i = 0; i < dstSize; i++) {
+          const srcX = (i * maxSrcIndex) / maxDstIndex;
+          const val = bicubicSample(sourceGrid, srcX, srcY);
+          row.push(val);
+        }
+        dst.push(row);
+      }
+
+      return dst;
+    }
+
+    // === Heatmap setup ===
+
+    // baseGrid holds the original 8x8 data
+    const baseGrid = [];
+    for (let y = 0; y < BASE_SIZE; y++) {
+      const row = [];
+      for (let x = 0; x < BASE_SIZE; x++) {
+        row.push(0);
+      }
+      baseGrid.push(row);
+    }
+
+    // x/y labels for the 64x64 display
+    const xLabels = Array.from({ length: DISPLAY_SIZE }, (_, i) => i);
+    const yLabels = Array.from({ length: DISPLAY_SIZE }, (_, i) => i);
 
     const heatmapDiv = document.getElementById("heatmap");
     const statusSpan = document.getElementById("status");
     const lastTopicSpan = document.getElementById("last-topic");
     const lastTsSpan = document.getElementById("last-ts");
 
+    // Initial display grid (all zeros, but upscaled)
+    const initialDisplayGrid = upscaleGridCubic(baseGrid, BASE_SIZE, DISPLAY_SIZE);
+
     Plotly.newPlot(
       heatmapDiv,
       [
         {
-          z: grid,
+          z: initialDisplayGrid,
           x: xLabels,
           y: yLabels,
           type: "heatmap",
@@ -96,39 +182,42 @@
         }
       ],
       {
-        title: "WateringKart – Live 8×8 Frame",
-        xaxis: { title: "X index" },
-        yaxis: { title: "Y index" }
+        title: "WateringKart – Live 8×8 Frame Upscaled to 64×64 (Cubic)",
+        xaxis: { title: "X index (0–63)" },
+        yaxis: { title: "Y index (0–63)" }
       }
     );
 
     function updateHeatmapFromValues(values) {
-      // values = array of 64 numbers, row-major
-      if (values.length < GRID_SIZE * GRID_SIZE) {
+      // values = array of 64 numbers, row-major 8x8
+      if (values.length < BASE_SIZE * BASE_SIZE) {
         console.warn("Not enough values in frame:", values.length);
         return;
       }
 
       let idx = 0;
-      for (let y = 0; y < GRID_SIZE; y++) {
-        for (let x = 0; x < GRID_SIZE; x++) {
-          grid[y][x] = values[idx++];
+      for (let y = 0; y < BASE_SIZE; y++) {
+        for (let x = 0; x < BASE_SIZE; x++) {
+          baseGrid[y][x] = values[idx++];
         }
       }
 
-      Plotly.update(heatmapDiv, { z: [grid] });
+      // Create a smooth 64x64 grid via bicubic interpolation
+      const displayGrid = upscaleGridCubic(baseGrid, BASE_SIZE, DISPLAY_SIZE);
+
+      Plotly.update(heatmapDiv, { z: [displayGrid] });
     }
 
     function parseFrameText(text) {
       // Split on commas and/or whitespace
       const parts = text.trim().split(/[,\s]+/).filter(Boolean);
-      if (parts.length < 1 + GRID_SIZE * GRID_SIZE) {
+      if (parts.length < 1 + BASE_SIZE * BASE_SIZE) {
         console.warn("Frame too short:", text);
         return null;
       }
 
-      const ts = parts[0]; // keep as string; can convert to Number if needed
-      const valStrings = parts.slice(1, 1 + GRID_SIZE * GRID_SIZE);
+      const ts = parts[0]; // timestamp (string is fine)
+      const valStrings = parts.slice(1, 1 + BASE_SIZE * BASE_SIZE);
       const values = valStrings.map((v) => Number(v));
 
       if (values.some((v) => Number.isNaN(v))) {
