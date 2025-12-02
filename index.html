@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WateringKart – Live Heatmap</title>
+
+  <!-- Plotly for the heatmap -->
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
+  <!-- MQTT.js browser bundle -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.14.1/mqtt.min.js"></script>
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 1rem;
+      background: #111;
+      color: #eee;
+    }
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .status {
+      margin-bottom: 0.75rem;
+      font-size: 0.9rem;
+    }
+    .status span {
+      font-weight: bold;
+    }
+    #heatmap {
+      width: 90vw;
+      max-width: 900px;
+      height: 70vh;
+      max-height: 600px;
+      margin-top: 1rem;
+    }
+    .small {
+      font-size: 0.8rem;
+      opacity: 0.7;
+    }
+    code {
+      background: #222;
+      padding: 0.1rem 0.3rem;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>WateringKart – Real-Time 8×8 Heatmap</h1>
+
+  <div class="status">
+    Broker (browser): <code>wss://test.mosquitto.org:8081/mqtt</code><br />
+    Subscribed topic: <code>wateringkart/+/frame</code><br />
+    Status: <span id="status">Connecting…</span><br />
+    Last topic: <span id="last-topic">–</span><br />
+    Last timestamp (µs): <span id="last-ts">–</span><br />
+  </div>
+
+  <div id="heatmap"></div>
+
+  <p class="small">
+    Frame format (string payload):<br />
+    <code>timestamp v1 v2 ... v64</code> or <code>timestamp,v1,v2,...,v64</code><br />
+    64 values fill an 8×8 matrix (row-major).
+  </p>
+
+  <script>
+    // === Heatmap setup ===
+    const GRID_SIZE = 8;
+
+    // Initialize 8×8 grid with zeros
+    const grid = [];
+    for (let y = 0; y < GRID_SIZE; y++) {
+      const row = [];
+      for (let x = 0; x < GRID_SIZE; x++) {
+        row.push(0);
+      }
+      grid.push(row);
+    }
+
+    const xLabels = Array.from({ length: GRID_SIZE }, (_, i) => i);
+    const yLabels = Array.from({ length: GRID_SIZE }, (_, i) => i);
+
+    const heatmapDiv = document.getElementById("heatmap");
+    const statusSpan = document.getElementById("status");
+    const lastTopicSpan = document.getElementById("last-topic");
+    const lastTsSpan = document.getElementById("last-ts");
+
+    Plotly.newPlot(
+      heatmapDiv,
+      [
+        {
+          z: grid,
+          x: xLabels,
+          y: yLabels,
+          type: "heatmap",
+          colorscale: "Jet",
+          reversescale: false
+        }
+      ],
+      {
+        title: "WateringKart – Live 8×8 Frame",
+        xaxis: { title: "X index" },
+        yaxis: { title: "Y index" }
+      }
+    );
+
+    function updateHeatmapFromValues(values) {
+      // values = array of 64 numbers, row-major
+      if (values.length < GRID_SIZE * GRID_SIZE) {
+        console.warn("Not enough values in frame:", values.length);
+        return;
+      }
+
+      let idx = 0;
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) {
+          grid[y][x] = values[idx++];
+        }
+      }
+
+      Plotly.update(heatmapDiv, { z: [grid] });
+    }
+
+    function parseFrameText(text) {
+      // Split on commas and/or whitespace
+      const parts = text.trim().split(/[,\s]+/).filter(Boolean);
+      if (parts.length < 1 + GRID_SIZE * GRID_SIZE) {
+        console.warn("Frame too short:", text);
+        return null;
+      }
+
+      const ts = parts[0]; // keep as string; can convert to Number if needed
+      const valStrings = parts.slice(1, 1 + GRID_SIZE * GRID_SIZE);
+      const values = valStrings.map((v) => Number(v));
+
+      if (values.some((v) => Number.isNaN(v))) {
+        console.warn("Some values are not numeric:", valStrings);
+        return null;
+      }
+
+      return { timestamp: ts, values };
+    }
+
+    // === MQTT setup ===
+    const brokerUrl = "wss://test.mosquitto.org:8081/mqtt";
+    const topicFilter = "wateringkart/+/frame";
+
+    const clientId = "web-wateringkart-" + Math.random().toString(16).slice(2);
+
+    const options = {
+      clientId,
+      clean: true,
+      reconnectPeriod: 2000, // ms
+      connectTimeout: 30_000
+      // Anonymous allowed on test.mosquitto.org
+    };
+
+    let client;
+    try {
+      client = mqtt.connect(brokerUrl, options);
+    } catch (err) {
+      console.error("MQTT connect error:", err);
+      statusSpan.textContent = "Error creating MQTT client (see console)";
+    }
+
+    if (client) {
+      client.on("connect", () => {
+        console.log("Connected to MQTT broker as", clientId);
+        statusSpan.textContent = "Connected";
+        client.subscribe(topicFilter, (err) => {
+          if (err) {
+            console.error("Subscription error:", err);
+            statusSpan.textContent = "Connected, subscribe failed";
+          } else {
+            console.log("Subscribed to", topicFilter);
+          }
+        });
+      });
+
+      client.on("reconnect", () => {
+        statusSpan.textContent = "Reconnecting…";
+      });
+
+      client.on("close", () => {
+        statusSpan.textContent = "Disconnected";
+      });
+
+      client.on("error", (err) => {
+        console.error("MQTT error:", err);
+        statusSpan.textContent = "Error (see console)";
+      });
+
+      client.on("message", (topicName, payload) => {
+        const text = payload.toString();
+        lastTopicSpan.textContent = topicName;
+
+        const parsed = parseFrameText(text);
+        if (!parsed) return;
+
+        lastTsSpan.textContent = parsed.timestamp;
+        updateHeatmapFromValues(parsed.values);
+      });
+    }
+  </script>
+</body>
+</html>
