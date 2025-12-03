@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>WateringKart – Live Heatmap (Cubic Upscaled 64×64)</title>
+  <title>WateringKart – Live Heatmap (JSON, Cubic 8×8 → 64×64)</title>
 
   <!-- Plotly for the heatmap -->
   <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
@@ -48,7 +48,7 @@
   </style>
 </head>
 <body>
-  <h1>WateringKart – Real-Time 8×8 → 64×64 Heatmap (Cubic)</h1>
+  <h1>WateringKart – Real-Time 8×8 → 64×64 Heatmap (JSON, Cubic)</h1>
 
   <div class="status">
     Broker (browser): <code>wss://test.mosquitto.org:8081/mqtt</code><br />
@@ -56,20 +56,20 @@
     Status: <span id="status">Connecting…</span><br />
     Last topic: <span id="last-topic">–</span><br />
     Last timestamp (µs): <span id="last-ts">–</span><br />
+    Last raw payload: <span id="last-payload">–</span>
   </div>
 
   <div id="heatmap"></div>
 
   <p class="small">
-    Frame format (string payload):<br />
-    <code>timestamp v1 v2 ... v64</code> or <code>timestamp,v1,v2,...,v64</code><br />
-    64 values fill an 8×8 matrix (row-major).<br />
-    Displayed as a 64×64 heatmap using bicubic interpolation.
+    Expected JSON payload:<br />
+    <code>{"ts_us": 1234567890, "frame": [64 integer values]}</code><br />
+    <code>frame</code> is an array of 64 values (8×8, row-major), upscaled to 64×64 via bicubic interpolation.
   </p>
 
   <script>
     // === Sizes ===
-    const BASE_SIZE = 8;    // incoming frame is 8x8
+    const BASE_SIZE = 8;     // incoming frame is 8x8
     const DISPLAY_SIZE = 64; // we upscale to 64x64 for plotting
 
     // === Helper: clamp ===
@@ -165,6 +165,7 @@
     const statusSpan = document.getElementById("status");
     const lastTopicSpan = document.getElementById("last-topic");
     const lastTsSpan = document.getElementById("last-ts");
+    const lastPayloadSpan = document.getElementById("last-payload");
 
     // Initial display grid (all zeros, but upscaled)
     const initialDisplayGrid = upscaleGridCubic(baseGrid, BASE_SIZE, DISPLAY_SIZE);
@@ -208,20 +209,32 @@
       Plotly.update(heatmapDiv, { z: [displayGrid] });
     }
 
+    // Parse JSON payload from simulator / device:
+    // {"ts_us": <int>, "frame": [64 values]}
     function parseFrameText(text) {
-      // Split on commas and/or whitespace
-      const parts = text.trim().split(/[,\s]+/).filter(Boolean);
-      if (parts.length < 1 + BASE_SIZE * BASE_SIZE) {
-        console.warn("Frame too short:", text);
+      let obj;
+      try {
+        obj = JSON.parse(text);
+      } catch (e) {
+        console.warn("Failed to parse JSON payload:", text, e);
         return null;
       }
 
-      const ts = parts[0]; // timestamp (string is fine)
-      const valStrings = parts.slice(1, 1 + BASE_SIZE * BASE_SIZE);
-      const values = valStrings.map((v) => Number(v));
+      if (!obj || !Array.isArray(obj.frame)) {
+        console.warn("Payload missing 'frame' array:", obj);
+        return null;
+      }
 
+      // ts_us is your timestamp; keep as string for display
+      const ts = obj.ts_us ?? obj.ts ?? null;
+      const values = obj.frame.map((v) => Number(v));
+
+      if (values.length < BASE_SIZE * BASE_SIZE) {
+        console.warn("Frame array too short:", values.length);
+        return null;
+      }
       if (values.some((v) => Number.isNaN(v))) {
-        console.warn("Some values are not numeric:", valStrings);
+        console.warn("Some frame values are not numeric:", obj.frame);
         return null;
       }
 
@@ -280,11 +293,13 @@
       client.on("message", (topicName, payload) => {
         const text = payload.toString();
         lastTopicSpan.textContent = topicName;
+        lastPayloadSpan.textContent =
+          text.length > 120 ? text.slice(0, 120) + "…" : text;
 
         const parsed = parseFrameText(text);
         if (!parsed) return;
 
-        lastTsSpan.textContent = parsed.timestamp;
+        lastTsSpan.textContent = parsed.timestamp ?? "–";
         updateHeatmapFromValues(parsed.values);
       });
     }
