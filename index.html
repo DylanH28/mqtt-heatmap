@@ -58,7 +58,7 @@
   <h1>WateringKart – Real-Time 8×8 → 64×64 Heatmap (JSON, Cubic)</h1>
 
   <div class="status">
-    Broker (browser): <code>wss://test.mosquitto.org:8081/mqtt</code><br />
+    Broker (browser): <code>ws://broker.hivemq.com:8000/mqtt</code><br />
     Subscribed topic: <code>wateringkart/+/frame</code><br />
     Status: <span id="status">Connecting…</span><br />
     Last topic: <span id="last-topic">–</span><br />
@@ -237,7 +237,8 @@
     }
 
     // === MQTT setup ===
-    const brokerUrl = "wss://test.mosquitto.org:8081/mqtt";
+    //const brokerUrl = "wss://test.mosquitto.org:8081/mqtt";
+    const brokerUrl = "ws://broker.hivemq.com:8000/mqtt";
     const topicFilter = "wateringkart/+/frame";
     const clientId = "web-wateringkart-" + Math.random().toString(16).slice(2);
 
